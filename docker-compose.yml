@@ -1,0 +1,5 @@
+services:
+  backend:
+    image: john252525/tp-20260831-tender-backend:v0.1.0
+  frontend:
+    image: john252525/tp-20260831-tender-frontend:v0.1.0
