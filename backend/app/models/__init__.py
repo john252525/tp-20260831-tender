@@ -13,3 +13,5 @@ from app.models.lot_supplier import LotSupplier
 from app.models.communication import Communication, CommunicationAttachment
 from app.models.commercial_offer import CommercialOffer, OfferPosition
 from app.models.decision import Decision
+
+from app.models.outgoing_draft import OutgoingDraft

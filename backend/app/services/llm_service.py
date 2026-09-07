@@ -1,3 +1,4 @@
+import re
 import asyncio
 import json
 from typing import Any, Dict, List
@@ -93,3 +94,65 @@ async def classify_incoming_email(subject: str, body_text: str) -> str:
     except Exception as exc:
         logger.error('llm.classify_email_error', error=str(exc))
         return 'other'
+
+
+async def generate_search_queries(tender_title: str, description: str, positions: List[Dict[str, Any]], region: str = '') -> List[Dict[str, str]]:
+    """Генерирует поисковые запросы для поиска поставщиков на основе тендера.
+
+    Возвращает JSON-массив вида:
+    [{"query": "матрас ортопедический оптом", "geo": "Москва"}, ...]
+    """
+    positions_brief = []
+    for p in positions[:15]:
+        positions_brief.append({
+            'name': p.get('name', ''),
+            'characteristics': (p.get('characteristics') or '')[:200],
+            'quantity': p.get('quantity'),
+            'unit': p.get('unit', ''),
+        })
+
+    prompt = f"""
+Ты — эксперт по поиску поставщиков. На основе данных тендера сформулируй от 3 до 10 поисковых запросов для поисковой системы (Яндекс/Google), которые помогут найти потенциальных поставщиков (производителей, дистрибьюторов, оптовиков).
+
+Название тендера: {tender_title}
+Описание: {(description or '')[:1000]}
+Позиции: {json.dumps(positions_brief, ensure_ascii=False, default=str)}
+Регион поставки (если указан): {region}
+
+Требования к запросам:
+- Запросы должны быть на русском языке.
+- Каждый запрос должен содержать ключевые характеристики товара (например, бренд, размеры, материал).
+- Добавь к запросам слова "оптом", "поставщик", "производитель", "дистрибьютор", "купить".
+- Не включай в запросы название конкретной компании-покупателя.
+- Для каждого запроса укажи рекомендуемое гео (регион поиска) — обычно это регион поставки, если он указан, иначе "Россия".
+
+Ответ — ТОЛЬКО JSON-массив:
+[{{"query": "запрос", "geo": "гео"}}, ...]
+"""
+    client = await _get_client()
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = await client.chat.completions.create(
+                model=settings.llm_model_chat,
+                messages=[
+                    {"role": "system", "content": "Ты — помощник для генерации поисковых запросов B2B."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+            )
+            content = response.choices[0].message.content
+            # Ищем JSON-массив в ответе (некоторые LLM обрамляют ```json ... ```)
+            json_match = re.search(r'\[.*\]', content, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(0))
+            else:
+                data = json.loads(content)
+            if not isinstance(data, list):
+                raise ValueError('Expected query list')
+            return data[:10]
+        except Exception as exc:
+            logger.warning('llm.generate_search_queries_attempt_failed', attempt=attempt, error=str(exc))
+            if attempt == max_retries - 1:
+                raise
+            await asyncio.sleep(2 ** attempt)

@@ -211,4 +211,21 @@ export const tendersApi = {
     const response = await apiClient.get(`/tenders/${id}/negotiation-status`);
     return extractData(response);
   },
+  async runPipeline(id: string): Promise<{ task_id: string }> {
+    const response = await apiClient.post(`/tenders/${id}/run-pipeline`);
+    return extractData(response);
+  },
+  async getPipelineSteps(id: string): Promise<any> {
+    const response = await apiClient.get(`/tenders/${id}/pipeline-steps`);
+    return extractData(response);
+  },
+  async listDrafts(id: string): Promise<any> {
+    const response = await apiClient.get(`/tenders/${id}/drafts`);
+    return extractData(response);
+  },
+  async sendDrafts(id: string, draftIds: string[]): Promise<any> {
+    const response = await apiClient.post(`/tenders/${id}/drafts/send`, { draft_ids: draftIds });
+    return extractData(response);
+  }
+
 };

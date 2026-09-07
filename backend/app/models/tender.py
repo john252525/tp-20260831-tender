@@ -37,6 +37,7 @@ class Tender(Base, UUIDMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default='NEW')
     embedding: Mapped[Optional[list]] = mapped_column(Vector(768), nullable=True)
     structured_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    search_queries: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     matched_category_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey('categories.id'), nullable=True)
     similarity_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

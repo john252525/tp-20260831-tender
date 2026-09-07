@@ -43,6 +43,7 @@ import { ProgressBar } from '../components/common/ProgressBar';
 import { LoadingSkeleton } from '../components/common/LoadingSkeleton';
 import { EmptyState } from '../components/common/EmptyState';
 import { ErrorAlert } from '../components/common/ErrorAlert';
+import { TenderPipelineTab } from '../components/pipeline/TenderPipelineTab';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { formatMoney, formatDate, formatDateTime } from '../lib/formatters';
 import { cn } from '../lib/utils';
@@ -1329,6 +1330,9 @@ export function TenderDetailPage() {
           <TabsTrigger value="suppliers" className="data-[state=active]:border-blue-600 data-[state=active]:text-blue-700 border-b-2 border-transparent rounded-none px-4 py-2.5 text-sm font-medium">
             Поставщики ({suppliers.length})
           </TabsTrigger>
+          <TabsTrigger value="pipeline" className="data-[state=active]:border-blue-600 data-[state=active]:text-blue-700 border-b-2 border-transparent rounded-none px-4 py-2.5 text-sm font-medium">
+            Конвейер
+          </TabsTrigger>
           <TabsTrigger value="communications" className="data-[state=active]:border-blue-600 data-[state=active]:text-blue-700 border-b-2 border-transparent rounded-none px-4 py-2.5 text-sm font-medium">
             Переписка
           </TabsTrigger>
@@ -1346,6 +1350,9 @@ export function TenderDetailPage() {
         <TabsContent value="overview" className="mt-4"><TenderOverviewTab tender={tender} /></TabsContent>
         <TabsContent value="positions" className="mt-4"><TenderPositionsTab positions={positions} /></TabsContent>
         <TabsContent value="documents" className="mt-4"><TenderDocumentsTab documents={documents} /></TabsContent>
+        <TabsContent value="pipeline" className="mt-4">
+          <TenderPipelineTab tenderId={tenderId!} tenderStatus={tender.status} />
+        </TabsContent>
         <TabsContent value="suppliers" className="mt-4">
           <TenderSuppliersTab tenderId={tenderId!} lotSuppliers={suppliers} onRefresh={() => tenderQuery.refetch()} />
         </TabsContent>

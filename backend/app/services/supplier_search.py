@@ -59,6 +59,49 @@ async def search_suppliers_for_tender(
         'results': top_results,
     }
 
+
+
+async def search_suppliers_with_queries(
+    tender_id, queries, max_suppliers=10,
+    channels=['google','internal_db'],
+    priority_order=['manufacturer','distributor','wholesaler'],
+    db=None,
+) -> Dict[str, Any]:
+    """
+    Поиск поставщиков для тендера использующий заранее сгенерированные запросы (query list).
+    """
+    tender = await db.get(Tender, tender_id)
+    if not tender:
+        raise ValueError('Тендер не найден')
+
+    positions_result = await db.execute(
+        select(TenderPosition).where(TenderPosition.tender_id == tender_id)
+    )
+    positions = positions_result.scalars().all()
+
+    all_found = []
+    if 'google' in channels or 'external' in channels:
+        all_found.extend(await _search_external(queries))
+    if 'internal_db' in channels:
+        all_found.extend(await _search_internal(tender, positions, db))
+
+    total_found = len(all_found)
+    deduped = _deduplicate(all_found)
+    after_dedup = len(deduped)
+    prioritized = _prioritize(deduped, priority_order)
+    after_priority_filter = len(prioritized)
+
+    top_results = prioritized[:max_suppliers]
+
+    return {
+        'search_queries_used': queries,
+        'total_found': total_found,
+        'after_dedup': after_dedup,
+        'after_priority_filter': after_priority_filter,
+        'results': top_results,
+    }
+
+
 async def _generate_search_queries(tender: Tender, positions: List[TenderPosition]) -> List[str]:
     queries = []
     if positions:

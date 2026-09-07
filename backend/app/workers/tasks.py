@@ -386,3 +386,35 @@ def negotiate_task(task_id: str):
         finally:
             await engine.dispose()
     asyncio.run(_runner())
+
+@celery_app.task
+def run_full_pipeline_task(task_id: str):
+    """Полный конвейер: обработка тендера, генерация запросов, поиск поставщиков, краулинг, черновики."""
+
+    async def _run():
+        await _update_task(task_id, status='IN_PROGRESS', started_at=datetime.now(timezone.utc))
+        try:
+            async with AsyncSessionLocal() as session:
+                task = await _get_task(task_id, session)
+                if not task or not task.entity_id:
+                    raise ValueError('Task or entity_id not found')
+                tender_id = task.entity_id
+                from app.services.pipeline_service import run_full_pipeline_for_tender
+                result = await run_full_pipeline_for_tender(tender_id, session, task_id=task_id)
+            # Полная задача уже обновилась внутри pipeline_service (status=COMPLETED)
+            # Дополнительная защита:
+            await _update_task(task_id, status='COMPLETED', progress_percent=100.0,
+                               completed_at=datetime.now(timezone.utc),
+                               result_summary=f"Конвейер завершён: черновиков {result.get('drafts_created', 0)}")
+        except Exception as exc:
+            logger.error('celery.run_full_pipeline_failed', task_id=task_id, error=str(exc))
+            await _update_task(task_id, status='FAILED', error_message=str(exc),
+                               completed_at=datetime.now(timezone.utc))
+
+    async def _runner():
+        try:
+            await _run()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_runner())

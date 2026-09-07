@@ -468,3 +468,242 @@ async def confirm_suppliers(
         }
     }
 
+
+
+@router.post('/{tender_id}/run-pipeline', status_code=status.HTTP_202_ACCEPTED)
+async def run_pipeline(
+    tender_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    """Запускает полный конвейер для тендера: обработка -> генерация запросов -> поиск поставщиков -> сбор email -> создание черновиков."""
+    from app.models.outgoing_draft import OutgoingDraft
+    from app.services.pipeline_service import run_full_pipeline_for_tender
+    from app.workers.tasks import run_full_pipeline_task
+
+    tender = await db.get(Tender, tender_id)
+    if not tender:
+        raise NotFoundError('Тендер не найден')
+
+    task = Task(
+        task_type='PIPELINE',
+        status='PENDING',
+        entity_type='tender',
+        entity_id=tender_id,
+        progress_percent=0.0,
+        input_data={'tender_id': str(tender_id)}
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+
+    celery_result = run_full_pipeline_task.delay(str(task.id))
+    task.celery_task_id = celery_result.id
+    await db.commit()
+
+    return {
+        'success': True,
+        'data': {
+            'task_id': str(task.id),
+            'status': 'ACCEPTED',
+            'estimated_time_seconds': 180,
+            'check_url': f'/api/v1/tasks/{task.id}'
+        }
+    }
+
+
+@router.get('/{tender_id}/pipeline-steps')
+async def get_pipeline_steps(
+    tender_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает текущие шаги пайплайна для тендера."""
+    tender = await db.get(Tender, tender_id)
+    if not tender:
+        raise NotFoundError('Тендер не найден')
+
+    task_result = await db.execute(
+        select(Task).where(
+            Task.entity_type == 'tender',
+            Task.entity_id == tender_id,
+            Task.task_type == 'PIPELINE',
+        ).order_by(Task.created_at.desc()).limit(1)
+    )
+    task = task_result.scalar_one_or_none()
+
+    steps = task.output_data.get('steps', []) if task and task.output_data else []
+
+    return {
+        'success': True,
+        'data': {
+            'task_id': str(task.id) if task else None,
+            'status': task.status if task else None,
+            'progress_percent': task.progress_percent if task else 0,
+            'steps': steps,
+            'result_summary': task.result_summary if task else None,
+            'error_message': task.error_message if task else None,
+        }
+    }
+
+
+@router.get('/{tender_id}/drafts')
+async def list_drafts(
+    tender_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    """Возвращает черновики писем для тендера."""
+    from app.models.outgoing_draft import OutgoingDraft
+
+    tender = await db.get(Tender, tender_id)
+    if not tender:
+        raise NotFoundError('Тендер не найден')
+
+    result = await db.execute(
+        select(OutgoingDraft).where(
+            OutgoingDraft.tender_id == tender_id
+        ).order_by(OutgoingDraft.created_at.desc())
+    )
+    drafts = result.scalars().all()
+
+    return {
+        'success': True,
+        'data': {
+            'tender_id': str(tender_id),
+            'drafts': [
+                {
+                    'id': str(d.id),
+                    'supplier_website': d.supplier_website,
+                    'supplier_name': d.supplier_name,
+                    'email': d.email,
+                    'subject': d.subject,
+                    'body_text': d.body_text,
+                    'status': d.status,
+                    'metadata': d.metadata,
+                    'created_at': d.created_at.isoformat() if d.created_at else None,
+                }
+                for d in drafts
+            ]
+        }
+    }
+
+
+@router.post('/{tender_id}/drafts/send', status_code=status.HTTP_202_ACCEPTED)
+async def send_drafts(
+    tender_id: uuid.UUID,
+    payload: dict = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Отправляет выбранные черновики (draft_ids) поставщикам."""
+    from app.models.outgoing_draft import OutgoingDraft
+    from app.services.email_service import send_email
+    from app.models.communication import Communication
+    from app.models.lot_supplier import LotSupplier
+    from app.models.supplier import Supplier
+
+    tender = await db.get(Tender, tender_id)
+    if not tender:
+        raise NotFoundError('Тендер не найден')
+
+    draft_ids = (payload or {}).get('draft_ids', [])
+    if not draft_ids:
+        draft_ids = [(await db.execute(
+            select(OutgoingDraft.id).where(
+                OutgoingDraft.tender_id == tender_id,
+                OutgoingDraft.status == 'draft'
+            )
+        )).scalars().all()]
+
+    sent_count = 0
+    failed_count = 0
+    sent_details = []
+
+    for draft_id in draft_ids:
+        draft = await db.get(OutgoingDraft, draft_id)
+        if not draft or draft.tender_id != tender_id or draft.status != 'draft':
+            continue
+
+        # Проверяем/создаём поставщика
+        supplier_result = await db.execute(
+            select(Supplier).where(Supplier.email == draft.email.lower())
+        )
+        supplier = supplier_result.scalar_one_or_none()
+
+        if not supplier:
+            supplier = Supplier(
+                name=draft.supplier_name or draft.email.split('@')[0],
+                type='unknown',
+                website=draft.supplier_website,
+                email=draft.email.lower(),
+                tags=['auto-found'],
+            )
+            db.add(supplier)
+            await db.flush()
+
+        # Привязываем к лоту
+        lot_result = await db.execute(
+            select(LotSupplier).where(
+                LotSupplier.tender_id == tender_id,
+                LotSupplier.supplier_id == supplier.id
+            )
+        )
+        lot = lot_result.scalar_one_or_none()
+        if not lot:
+            lot = LotSupplier(
+                tender_id=tender_id,
+                supplier_id=supplier.id,
+                status='CP_REQUESTED',
+                source='pipeline',
+            )
+            db.add(lot)
+            await db.flush()
+
+        # Отправляем email
+        sent, message_id = await send_email(
+            to_address=draft.email,
+            subject=draft.subject,
+            body_text=draft.body_text,
+            body_html=None,
+            db=db
+        )
+
+        if not sent:
+            failed_count += 1
+            continue
+
+        # Создаём Communication
+        comm = Communication(
+            lot_supplier_id=lot.id,
+            tender_id=tender_id,
+            direction='outgoing',
+            channel='email',
+            subject=draft.subject,
+            body_text=draft.body_text,
+            message_type='cp_request',
+            external_id=message_id,
+            sent_at=datetime.now(timezone.utc),
+        )
+        db.add(comm)
+
+        # Обновляем статус черновика
+        draft.status = 'sent'
+        draft.sent_at = datetime.now(timezone.utc)
+        draft.sent_external_id = message_id
+
+        sent_count += 1
+        sent_details.append({
+            'draft_id': str(draft.id),
+            'email': draft.email,
+            'supplier_id': str(supplier.id),
+            'message_id': message_id,
+        })
+
+    await db.commit()
+
+    return {
+        'success': True,
+        'data': {
+            'tender_id': str(tender_id),
+            'sent_count': sent_count,
+            'failed_count': failed_count,
+            'details': sent_details,
+        }
+    }
