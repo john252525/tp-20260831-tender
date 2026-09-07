@@ -401,11 +401,7 @@ def run_full_pipeline_task(task_id: str):
                 tender_id = task.entity_id
                 from app.services.pipeline_service import run_full_pipeline_for_tender
                 result = await run_full_pipeline_for_tender(tender_id, session, task_id=task_id)
-            # Полная задача уже обновилась внутри pipeline_service (status=COMPLETED)
-            # Дополнительная защита:
-            await _update_task(task_id, status='COMPLETED', progress_percent=100.0,
-                               completed_at=datetime.now(timezone.utc),
-                               result_summary=f"Конвейер завершён: черновиков {result.get('drafts_created', 0)}")
+            # Задача уже завершена внутри pipeline_service.complete_pipeline_task
         except Exception as exc:
             logger.error('celery.run_full_pipeline_failed', task_id=task_id, error=str(exc))
             await _update_task(task_id, status='FAILED', error_message=str(exc),

@@ -577,7 +577,7 @@ async def list_drafts(
                     'subject': d.subject,
                     'body_text': d.body_text,
                     'status': d.status,
-                    'metadata': d.metadata,
+                    'metadata': d.metadata_json,
                     'created_at': d.created_at.isoformat() if d.created_at else None,
                 }
                 for d in drafts

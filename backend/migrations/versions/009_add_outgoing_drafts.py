@@ -24,7 +24,7 @@ def upgrade() -> None:
         sa.Column('subject', sa.Text(), nullable=False, server_default=''),
         sa.Column('body_text', sa.Text(), nullable=False, server_default=''),
         sa.Column('status', sa.String(20), nullable=False, server_default='draft'),
-        sa.Column('metadata', JSONB(), nullable=True),
+        sa.Column('metadata_json', JSONB(), nullable=True),
         sa.Column('sent_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('sent_external_id', sa.Text(), nullable=False, server_default=''),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),

@@ -23,6 +23,6 @@ class OutgoingDraft(Base, UUIDMixin, TimestampMixin):
     subject: Mapped[str] = mapped_column(Text, nullable=False, default='')
     body_text: Mapped[str] = mapped_column(Text, nullable=False, default='')
     status: Mapped[str] = mapped_column(String(20), nullable=False, default='draft')  # draft, sent, cancelled
-    metadata: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    metadata_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_external_id: Mapped[str] = mapped_column(Text, nullable=False, default='')
