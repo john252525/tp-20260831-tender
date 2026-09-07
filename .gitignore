@@ -1,0 +1,42 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+dist/
+build/
+develop-eggs/
+.eggs/
+
+# ---------- Frontend / Node ----------
+node_modules/
+.vite/
+coverage/
+playwright-report/
+
+# ---------- Environment / Secrets ----------
+.env
+.env.local
+.env.*.local
+.env.bak
+
+# ---------- IDE / OS ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+nohup.out
+
+# ---------- Logs ----------
+*.log
+logs/

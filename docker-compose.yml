@@ -1,5 +1,220 @@
 services:
   backend:
-    image: john252525/tp-20260831-tender-backend:v0.1.0
+    build:
+      context: ./backend
+    expose:
+      - '8000'
+    ports:
+      - 127.0.0.1:${BACKEND_PORT:-18080}:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      ollama:
+        condition: service_started
+    environment:
+      APP_ENV: production
+      APP_DEBUG: 'false'
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-changeme}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: tender_pipeline
+      POSTGRES_USER: tender_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["http://199.189.253.227:${FRONTEND_PORT:-18081}"]'
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-changeme}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.openai.com/v1}
+      LLM_MODEL_CHAT: ${LLM_MODEL_CHAT:-gpt-4o-mini}
+      LLM_MODEL_EMBEDDING: ${LLM_MODEL_EMBEDDING:-nomic-embed-text}
+      LLM_EMBEDDING_DIMENSIONS: ${LLM_EMBEDDING_DIMENSIONS:-768}
+      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://ollama:11434}
+      SEARCH_API_URL: ${SEARCH_API_URL:-https://2222.apitter.com/search/api.php}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      IMAP_HOST: ${IMAP_HOST:-}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USER: ${IMAP_USER:-}
+      IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-tender-files}
+      S3_USE_SSL: ${S3_USE_SSL:-false}
+    restart: unless-stopped
+
   frontend:
-    image: john252525/tp-20260831-tender-frontend:v0.1.0
+    build:
+      context: ./frontend
+    ports:
+      - ${FRONTEND_PORT:-18081}:80
+    depends_on:
+      backend:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    build:
+      context: ./postgres
+    environment:
+      POSTGRES_DB: tender_pipeline
+      POSTGRES_USER: tender_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - 127.0.0.1:${POSTGRES_PORT:-18400}:5432
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tender_user -d tender_pipeline"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    command:
+      - sh
+      - -c
+      - celery -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      ollama:
+        condition: service_started
+    environment:
+      APP_ENV: production
+      APP_DEBUG: 'false'
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-changeme}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: tender_pipeline
+      POSTGRES_USER: tender_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["http://199.189.253.227:${FRONTEND_PORT:-18081}"]'
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-changeme}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.openai.com/v1}
+      LLM_MODEL_CHAT: ${LLM_MODEL_CHAT:-gpt-4o-mini}
+      LLM_MODEL_EMBEDDING: ${LLM_MODEL_EMBEDDING:-nomic-embed-text}
+      LLM_EMBEDDING_DIMENSIONS: ${LLM_EMBEDDING_DIMENSIONS:-768}
+      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://ollama:11434}
+      SEARCH_API_URL: ${SEARCH_API_URL:-https://2222.apitter.com/search/api.php}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      IMAP_HOST: ${IMAP_HOST:-}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USER: ${IMAP_USER:-}
+      IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-tender-files}
+      S3_USE_SSL: ${S3_USE_SSL:-false}
+    restart: unless-stopped
+
+  worker-beat:
+    build:
+      context: ./backend
+    command:
+      - sh
+      - -c
+      - celery -A app.workers.celery_app.celery_app beat --loglevel=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      APP_DEBUG: 'false'
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-changeme}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: tender_pipeline
+      POSTGRES_USER: tender_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      REDIS_URL: redis://redis:6379/0
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-changeme}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.openai.com/v1}
+      LLM_MODEL_CHAT: ${LLM_MODEL_CHAT:-gpt-4o-mini}
+      LLM_MODEL_EMBEDDING: ${LLM_MODEL_EMBEDDING:-nomic-embed-text}
+      LLM_EMBEDDING_DIMENSIONS: ${LLM_EMBEDDING_DIMENSIONS:-768}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      IMAP_HOST: ${IMAP_HOST:-}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USER: ${IMAP_USER:-}
+      IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-tender-files}
+      S3_USE_SSL: ${S3_USE_SSL:-false}
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    command: serve
+    volumes:
+      - ollama_data:/root/.ollama
+    expose:
+      - "11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
+  ollama_data:
