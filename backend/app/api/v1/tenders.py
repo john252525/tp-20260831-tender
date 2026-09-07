@@ -15,7 +15,7 @@ from app.models.tender_requirements import TenderRequirements
 from app.models.tender_status_history import TenderStatusHistory
 from app.models.task import Task
 from app.models.category import Category
-from app.schemas.tenders import TenderCreateRequest, TenderUpdateRequest, ReprocessRequest, SearchSuppliersRequest, ConfirmSuppliersRequest
+from app.schemas.tenders import TenderCreateRequest, TenderUpdateRequest, ReprocessRequest, SearchSuppliersRequest, ConfirmSuppliersRequest, SendDraftsRequest
 from app.services.tender_processor import process_tender
 from app.services.supplier_search import search_suppliers_for_tender
 from app.workers.tasks import process_tender_task, search_suppliers_task
@@ -589,7 +589,7 @@ async def list_drafts(
 @router.post('/{tender_id}/drafts/send', status_code=status.HTTP_202_ACCEPTED)
 async def send_drafts(
     tender_id: uuid.UUID,
-    payload: dict = None,
+    payload: SendDraftsRequest | None = None,
     db: AsyncSession = Depends(get_db)
 ):
     """Отправляет выбранные черновики (draft_ids) поставщикам."""
@@ -603,21 +603,30 @@ async def send_drafts(
     if not tender:
         raise NotFoundError('Тендер не найден')
 
-    draft_ids = (payload or {}).get('draft_ids', [])
+    draft_ids = payload.draft_ids if payload else []
+    # Пустой список = ничего не отправляем (безопасное поведение)
     if not draft_ids:
-        draft_ids = [(await db.execute(
-            select(OutgoingDraft.id).where(
-                OutgoingDraft.tender_id == tender_id,
-                OutgoingDraft.status == 'draft'
-            )
-        )).scalars().all()]
+        return {
+            'success': True,
+            'data': {
+                'tender_id': str(tender_id),
+                'sent_count': 0,
+                'failed_count': 0,
+                'details': [],
+                'message': 'Нет выбранных черновиков для отправки',
+            }
+        }
 
     sent_count = 0
     failed_count = 0
     sent_details = []
 
     for draft_id in draft_ids:
-        draft = await db.get(OutgoingDraft, draft_id)
+        try:
+            draft_uuid = uuid.UUID(str(draft_id))
+        except (ValueError, TypeError):
+            continue
+        draft = await db.get(OutgoingDraft, draft_uuid)
         if not draft or draft.tender_id != tender_id or draft.status != 'draft':
             continue
 

@@ -36,3 +36,10 @@ class SearchSuppliersRequest(BaseModel):
 class ConfirmSuppliersRequest(BaseModel):
     supplier_ids: List[UUID] = Field(default_factory=list)
     new_suppliers: List[SupplierCreateRequest] = Field(default_factory=list)
+
+
+class RunPipelineRequest(BaseModel):
+    pass
+
+class SendDraftsRequest(BaseModel):
+    draft_ids: List[UUID] = Field(default_factory=list)
