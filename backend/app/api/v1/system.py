@@ -7,6 +7,7 @@ from app.core.database import engine
 
 router = APIRouter()
 
+@router.get('/system/health')
 @router.get('/health')
 async def health(request: Request):
     db_status = 'healthy'
