@@ -35,9 +35,10 @@ async def calculate_score(tender: Tender, db: AsyncSession) -> tuple[float, Dict
     """Вычисляет итоговый скор тендера и возвращает (score, components)."""
     scoring = await _get_scoring_settings(db)
 
-    # 1. Маржинальность Sm (пока fallback, так как нет данных о себестоимости)
-    margin_score = float(scoring['margin_fallback_score'])
-    # TODO: реализовать расчёт маржи на основе собранных КП и среднерыночных цен
+    # 1. Маржинальность Sm.
+    # Источники по убыванию достоверности: фактические КП по этому тендеру,
+    # затем средняя маржа по категории (исторические КП), затем значение из настроек.
+    margin_score, margin_details = await _calculate_margin_score(tender, db, scoring)
 
     # 2. Простота исполнения Ss
     simplicity_score = await _calculate_simplicity(tender, db, scoring)
@@ -72,7 +73,86 @@ async def calculate_score(tender: Tender, db: AsyncSession) -> tuple[float, Dict
         'volume_score': volume_score,
         'competition_score': competition_score,
     }
+    components.update(margin_details)
     return round(total, 2), components
+
+
+def _margin_to_score(margin_percent: float, min_margin_percent: float) -> float:
+    """Переводит маржу в балл 0..100.
+
+    Порог из настроек соответствует 60 баллам (тендер считается выгодным),
+    вдвое большая маржа — 100 баллам. Ниже порога балл падает линейно.
+    """
+    if margin_percent <= 0:
+        return 0.0
+    threshold = max(min_margin_percent, 1.0)
+    if margin_percent >= threshold * 2:
+        return 100.0
+    if margin_percent >= threshold:
+        # 60..100 баллов на отрезке [порог; 2*порог]
+        ratio = (margin_percent - threshold) / threshold
+        return round(60.0 + 40.0 * ratio, 2)
+    # 0..60 баллов на отрезке [0; порог]
+    return round(60.0 * (margin_percent / threshold), 2)
+
+
+async def _calculate_margin_score(
+    tender: Tender,
+    db: AsyncSession,
+    scoring: Dict[str, Any],
+) -> tuple[float, Dict[str, Any]]:
+    """Оценивает маржинальность тендера по фактическим данным.
+
+    Фактические КП по тендеру точнее любой оценки, поэтому используются первыми.
+    Если КП ещё нет, берётся средняя маржа по категории тендера (из прошлых
+    закупок) — это рыночный ориентир. И только при полном отсутствии данных
+    берётся значение из настроек.
+    """
+    from app.models.commercial_offer import CommercialOffer
+
+    min_margin = float(scoring.get('min_margin_percent', 15.0) or 15.0)
+
+    # 1) Фактические КП по этому тендеру
+    # Пустые КП (статус NONE) не содержат цен и дают фиктивную маржу —
+    # в расчёте участвуют только содержательные предложения.
+    offers = (await db.execute(
+        select(CommercialOffer.margin_percent).where(
+            CommercialOffer.tender_id == tender.id,
+            CommercialOffer.margin_percent.is_not(None),
+            CommercialOffer.status.in_(('FULL', 'PARTIAL')),
+        )
+    )).scalars().all()
+
+    if offers:
+        best_margin = max(float(m) for m in offers)
+        return _margin_to_score(best_margin, min_margin), {
+            'margin_source': 'offers',
+            'margin_percent': round(best_margin, 2),
+            'margin_offers_count': len(offers),
+        }
+
+    # 2) Средняя маржа по категории тендера
+    if tender.matched_category_id:
+        category_margins = (await db.execute(
+            select(CommercialOffer.margin_percent).where(
+                CommercialOffer.margin_percent.is_not(None),
+                CommercialOffer.status.in_(('FULL', 'PARTIAL')),
+                CommercialOffer.tender_id.in_(
+                    select(Tender.id).where(Tender.matched_category_id == tender.matched_category_id)
+                ),
+            )
+        )).scalars().all()
+        if category_margins:
+            avg_margin = sum(float(m) for m in category_margins) / len(category_margins)
+            return _margin_to_score(avg_margin, min_margin), {
+                'margin_source': 'category',
+                'margin_percent': round(avg_margin, 2),
+                'margin_offers_count': len(category_margins),
+            }
+
+    # 3) Данных нет — значение из настроек
+    fallback = float(scoring['margin_fallback_score'])
+    return fallback, {'margin_source': 'fallback', 'margin_percent': None}
 
 async def _calculate_simplicity(tender: Tender, db: AsyncSession, scoring: Dict[str, Any]) -> float:
     """Вычисляет скор простоты исполнения на основе позиций и требований."""

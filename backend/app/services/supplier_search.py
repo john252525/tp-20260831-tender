@@ -141,8 +141,14 @@ async def _search_external(queries: List[str]) -> List[Dict[str, Any]]:
                     domain = _extract_domain(url)
                     if not domain:
                         continue
+                    # Маркетплейсы и каталоги не являются поставщиками
+                    if domain in NON_SUPPLIER_DOMAINS:
+                        continue
+                    title = (item.get('title') or '').strip()
+                    # SEO-заголовок нельзя использовать как имя поставщика
+                    name = title if not _looks_like_seo_title(title) else _supplier_name_from_domain(domain)
                     candidates.append({
-                        'name': item.get('title', domain),
+                        'name': name,
                         'website': url,
                         'email': '',
                         'phone': '',
@@ -205,13 +211,49 @@ async def _search_internal(tender: Tender, positions: List[TenderPosition], db: 
         })
     return candidates
 
+# Страницы-каталоги и маркетплейсы: это не сайты конкретного поставщика
+NON_SUPPLIER_DOMAINS = {
+    'avito.ru', 'youla.ru', 'ozon.ru', 'wildberries.ru', 'market.yandex.ru',
+    'aliexpress.ru', 'prom.ua', 'tiu.ru', 'satu.kz', 'flagma.ru',
+    'wikipedia.org', 'youtube.com', 'vk.com', 'ok.ru', 'telegram.me',
+    'yandex.ru', 'google.com', 'mail.ru', 'drom.ru', 'auto.ru',
+}
+
+
+def _looks_like_seo_title(title: str) -> bool:
+    """Похож ли заголовок на SEO-текст выдачи, а не на название компании.
+
+    Поисковик отдаёт заголовки вида «купить в Москве - цена на ...», из которых
+    в базу попадали мусорные имена поставщиков.
+    """
+    if not title:
+        return True
+    lowered = title.strip().lower()
+    if len(lowered) < 3 or lowered.endswith('...'):
+        return True
+    seo_markers = (
+        'купить', 'цена', 'оптом', 'от производителя', 'доставка', 'в москве',
+        'в спб', 'в краснодаре', 'интернет-магазин', 'каталог', 'прайс',
+        'со склада', 'розница', 'выгодная',
+    )
+    return any(marker in lowered for marker in seo_markers)
+
+
+def _supplier_name_from_domain(domain: str) -> str:
+    """Человекочитаемое имя из домена: perchatki21.ru -> Perchatki21."""
+    base = (domain or '').split('.')[0].strip()
+    if not base:
+        return domain or ''
+    return base[:1].upper() + base[1:] if base else base
+
+
 def _extract_domain(url: str) -> str:
     """Извлекает домен второго уровня из URL."""
     if not url:
         return ''
     try:
-        parsed = urlparse(url)
-        host = parsed.netloc.lower()
+        parsed = urlparse(str(url))
+        host = (parsed.netloc or '').lower()
         if host.startswith('www.'):
             host = host[4:]
         parts = host.split('.')
@@ -227,16 +269,17 @@ def _deduplicate(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     unique = []
     for cand in candidates:
         identifiers = []
-        domain = cand.get('domain', '')
+        # Значения могут быть None, а не только отсутствовать
+        domain = cand.get('domain') or ''
         if domain:
             identifiers.append(f'domain:{domain}')
-        email = cand.get('email', '').lower()
+        email = (cand.get('email') or '').lower()
         if email:
             identifiers.append(f'email:{email}')
-        inn = cand.get('inn', '')
+        inn = cand.get('inn') or ''
         if inn:
             identifiers.append(f'inn:{inn}')
-        phone = cand.get('phone', '')
+        phone = cand.get('phone') or ''
         if phone:
             normalized_phone = re.sub(r'\D', '', phone)
             identifiers.append(f'phone:{normalized_phone}')

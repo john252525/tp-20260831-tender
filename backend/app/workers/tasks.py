@@ -1,6 +1,6 @@
 import asyncio
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from uuid import UUID
 
 from app.workers.celery_app import celery_app
@@ -28,6 +28,9 @@ from app.services.file_generator import generate_positions_excel
 from app.services.s3_service import s3_service
 
 logger = structlog.get_logger()
+
+# Через сколько минут задача в PENDING считается зависшей
+STUCK_TASK_MINUTES = 15
 
 async def _get_task(task_id: str, session):
     return await session.get(Task, UUID(task_id))
@@ -215,6 +218,13 @@ def send_communications_task(task_id: str):
                     session.add(lot)
                     sent_count += 1
 
+                # Статус тендера выводится из состояния лотов
+                try:
+                    from app.services.tender_status_service import recalculate_tender_status
+                    await recalculate_tender_status(tender_id, session)
+                except Exception as exc:
+                    logger.warning('celery.status_recalc_failed', task_id=task_id, error=str(exc))
+
                 await session.commit()
                 result_summary = f'Отправлено запросов КП: {sent_count}'
                 if failed_count:
@@ -342,6 +352,14 @@ def receive_emails_task():
                     session.add(offer)
                     await session.flush()
 
+                    # Письмо-ответ уже получено: статус тендера пересчитываем
+                    # сразу, не дожидаясь разбора КП.
+                    try:
+                        from app.services.tender_status_service import recalculate_tender_status
+                        await recalculate_tender_status(lot.tender_id, session)
+                    except Exception as exc:
+                        logger.warning('celery.status_recalc_failed', error=str(exc))
+
                     parse_task = Task(
                         task_type='PARSE_CP',
                         status='PENDING',
@@ -386,6 +404,383 @@ def negotiate_task(task_id: str):
         finally:
             await engine.dispose()
     asyncio.run(_runner())
+
+@celery_app.task
+def sync_active_sources_task():
+    """Периодически синхронизирует активные источники тендеров.
+
+    Интервал опроса берётся из настроек источника (poll_interval_minutes):
+    если с прошлой синхронизации прошло меньше времени, источник пропускается.
+    """
+    async def _run():
+        from app.models.tender_source import TenderSource
+        from app.models.setting import Setting
+
+        async with AsyncSessionLocal() as session:
+            # Значение по умолчанию для интервала опроса
+            default_interval = 30
+            setting_result = await session.execute(
+                select(Setting).where(Setting.section == 'tender_source', Setting.key == 'poll_interval_minutes')
+            )
+            setting = setting_result.scalar_one_or_none()
+            if setting is not None:
+                try:
+                    default_interval = int(setting.value)
+                except (TypeError, ValueError):
+                    default_interval = 30
+
+            from app.services.tender_sync_service import is_source_sync_supported
+
+            candidates = (await session.execute(
+                select(TenderSource).where(TenderSource.is_active == True)
+            )).scalars().all()
+            # Опрашиваем только источники, для которых синхронизация реально
+            # реализована: иначе автосинхронизация крутится впустую.
+            sources = [s for s in candidates if is_source_sync_supported(s)]
+
+            now = datetime.now(timezone.utc)
+            started = 0
+            for source in sources:
+                interval = default_interval
+                config = source.config or {}
+                if config.get('poll_interval_minutes'):
+                    try:
+                        interval = int(config['poll_interval_minutes'])
+                    except (TypeError, ValueError):
+                        pass
+                if source.last_sync_at is not None:
+                    elapsed_minutes = (now - source.last_sync_at).total_seconds() / 60
+                    if elapsed_minutes < interval:
+                        continue
+
+                task = Task(
+                    task_type='SYNC_TENDERS',
+                    status='PENDING',
+                    entity_type='tender_source',
+                    entity_id=source.id,
+                    progress_percent=0.0,
+                    input_data={'source_id': str(source.id), 'trigger': 'schedule'},
+                )
+                session.add(task)
+                await session.flush()
+                celery_result = sync_tenders_task.delay(str(task.id))
+                task.celery_task_id = celery_result.id
+                started += 1
+
+            await session.commit()
+            logger.info('celery.sync_active_sources_done', candidates=len(candidates), pollable=len(sources), started=started)
+
+    async def _runner():
+        try:
+            await _run()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_runner())
+
+
+@celery_app.task
+def process_new_tenders_task():
+    """Автоматически ставит на обработку новые тендеры.
+
+    Обрабатываются тендеры со статусом NEW, по которым ещё нет активной задачи
+    PROCESS_TENDER. Это замыкает конвейер: импорт -> обработка -> оценка.
+    """
+    async def _run():
+        from app.models.tender_status_history import TenderStatusHistory  # noqa: F401
+
+        async with AsyncSessionLocal() as session:
+            active_result = await session.execute(
+                select(Task.entity_id).where(
+                    Task.task_type == 'PROCESS_TENDER',
+                    Task.status.in_(['PENDING', 'IN_PROGRESS']),
+                )
+            )
+            busy_ids = {row[0] for row in active_result.all() if row[0] is not None}
+
+            tenders = (await session.execute(
+                select(Tender).where(Tender.status == 'NEW').order_by(Tender.created_at).limit(50)
+            )).scalars().all()
+
+            started = 0
+            for tender in tenders:
+                if tender.id in busy_ids:
+                    continue
+                task = Task(
+                    task_type='PROCESS_TENDER',
+                    status='PENDING',
+                    entity_type='tender',
+                    entity_id=tender.id,
+                    progress_percent=0.0,
+                    input_data={'tender_id': str(tender.id), 'trigger': 'schedule'},
+                )
+                session.add(task)
+                await session.flush()
+                celery_result = process_tender_task.delay(str(task.id))
+                task.celery_task_id = celery_result.id
+                started += 1
+
+            await session.commit()
+            logger.info('celery.process_new_tenders_done', candidates=len(tenders), started=started)
+
+    async def _runner():
+        try:
+            await _run()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_runner())
+
+
+@celery_app.task
+def start_pipeline_for_scored_tenders_task():
+    """Запускает полный конвейер для оценённых тендеров.
+
+    После скоринга конвейер останавливался: генерация запросов, поиск
+    поставщиков, сбор email и черновики писем запускались только вручную
+    через API. Здесь лучшие по скору тендеры уходят в конвейер автоматически.
+    """
+    async def _run():
+        from app.models.setting import Setting
+
+        async with AsyncSessionLocal() as session:
+            # Порог скора из настроек: в конвейер уходят только лучшие
+            min_score = 60.0
+            setting_result = await session.execute(
+                select(Setting).where(Setting.section == 'scoring', Setting.key == 'min_total_score')
+            )
+            setting = setting_result.scalar_one_or_none()
+            if setting is not None:
+                try:
+                    min_score = float(setting.value)
+                except (TypeError, ValueError):
+                    pass
+
+            # Не запускаем повторно то, что уже в работе
+            active_result = await session.execute(
+                select(Task.entity_id).where(
+                    Task.task_type.in_(['PIPELINE', 'SEARCH_SUPPLIERS']),
+                    Task.status.in_(['PENDING', 'IN_PROGRESS']),
+                )
+            )
+            busy_ids = {row[0] for row in active_result.all() if row[0] is not None}
+
+            candidates = (await session.execute(
+                select(Tender)
+                .where(Tender.status == 'SCORED', Tender.score >= min_score)
+                .order_by(Tender.score.desc())
+                .limit(5)
+            )).scalars().all()
+
+            started = 0
+            for tender in candidates:
+                if tender.id in busy_ids:
+                    continue
+                task = Task(
+                    task_type='PIPELINE',
+                    status='PENDING',
+                    entity_type='tender',
+                    entity_id=tender.id,
+                    progress_percent=0.0,
+                    input_data={'tender_id': str(tender.id), 'trigger': 'schedule'},
+                )
+                session.add(task)
+                await session.flush()
+                celery_result = run_full_pipeline_task.delay(str(task.id))
+                task.celery_task_id = celery_result.id
+                started += 1
+
+            await session.commit()
+            logger.info('celery.start_pipeline_done', candidates=len(candidates), started=started, min_score=min_score)
+
+    async def _runner():
+        try:
+            await _run()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_runner())
+
+
+@celery_app.task
+def request_discounts_task():
+    """Запрашивает улучшение цен у поставщиков с завышенными КП.
+
+    Сравнивает предложения по лотам и просит поставщиков пересмотреть цены,
+    если разрыв превышает ``price_diff_threshold_percent``.
+    """
+    async def _run():
+        from app.services.negotiation_service import request_discounts
+
+        async with AsyncSessionLocal() as session:
+            tender_ids = [row[0] for row in (await session.execute(
+                select(LotSupplier.tender_id)
+                .where(LotSupplier.status.in_(('CP_RECEIVED', 'NEGOTIATING')))
+                .group_by(LotSupplier.tender_id)
+                .limit(50)
+            )).all()]
+
+            total = 0
+            for tender_id in tender_ids:
+                try:
+                    total += await request_discounts(str(tender_id), session)
+                except Exception as exc:
+                    logger.warning('celery.discount_failed', tender_id=str(tender_id), error=str(exc))
+
+            logger.info('celery.request_discounts_done', tenders=len(tender_ids), sent=total)
+
+    async def _runner():
+        try:
+            await _run()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_runner())
+
+
+@celery_app.task
+def send_reminders_task():
+    """Напоминает поставщикам, не ответившим на запрос КП.
+
+    Раньше напоминания не отправлялись вообще: настройка
+    ``reminder_after_hours`` в БД не использовалась, и лоты навсегда
+    оставались в CP_REQUESTED.
+    """
+    async def _run():
+        from app.services.negotiation_service import send_reminders
+
+        async with AsyncSessionLocal() as session:
+            tender_ids = [row[0] for row in (await session.execute(
+                select(LotSupplier.tender_id)
+                .where(LotSupplier.status == 'CP_REQUESTED')
+                .group_by(LotSupplier.tender_id)
+                .limit(50)
+            )).all()]
+
+            total = 0
+            for tender_id in tender_ids:
+                try:
+                    total += await send_reminders(str(tender_id), session)
+                except Exception as exc:
+                    logger.warning('celery.reminder_failed', tender_id=str(tender_id), error=str(exc))
+
+            logger.info('celery.send_reminders_done', tenders=len(tender_ids), sent=total)
+
+    async def _runner():
+        try:
+            await _run()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_runner())
+
+
+@celery_app.task
+def reprocess_unenriched_tenders_task():
+    """Повторно обрабатывает тендеры, упавшие из-за отсутствия данных.
+
+    Тендеры, импортированные до появления разбора состава закупки, уходили
+    в ERROR с сообщением «Нет текста для семантического анализа». Теперь
+    обработка умеет добирать позиции из API ГосПлан, поэтому такие тендеры
+    имеет смысл вернуть в работу.
+    """
+    async def _run():
+        async with AsyncSessionLocal() as session:
+            broken = (await session.execute(
+                select(Tender).where(
+                    Tender.status == 'ERROR',
+                    Tender.processing_error == 'Нет текста для семантического анализа',
+                ).order_by(Tender.created_at).limit(20)
+            )).scalars().all()
+
+            started = 0
+            for tender in broken:
+                task = Task(
+                    task_type='PROCESS_TENDER',
+                    status='PENDING',
+                    entity_type='tender',
+                    entity_id=tender.id,
+                    progress_percent=0.0,
+                    input_data={'tender_id': str(tender.id), 'trigger': 'reprocess_unenriched'},
+                )
+                session.add(task)
+                await session.flush()
+                celery_result = process_tender_task.delay(str(task.id))
+                task.celery_task_id = celery_result.id
+                started += 1
+
+            await session.commit()
+            logger.info('celery.reprocess_unenriched_done', candidates=len(broken), started=started)
+
+    async def _runner():
+        try:
+            await _run()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_runner())
+
+
+@celery_app.task
+def requeue_stuck_tasks_task():
+    """Перезапускает задачи, зависшие в PENDING без задания в очереди.
+
+    Такие задачи появляются, если воркер был остановлен между созданием записи
+    Task и постановкой задания в Celery: запись в БД есть, а в Redis — нет.
+    """
+    async def _run():
+        # Задача считается зависшей, если она в PENDING дольше порога.
+        # Проверять состояние через Celery AsyncResult нельзя: для неизвестного
+        # (потерянного) задания Celery возвращает PENDING, и такая задача
+        # никогда бы не была перезапущена.
+        stuck_before = datetime.now(timezone.utc) - timedelta(minutes=STUCK_TASK_MINUTES)
+
+        async with AsyncSessionLocal() as session:
+            stuck = (await session.execute(
+                select(Task).where(
+                    Task.status == 'PENDING',
+                    Task.created_at < stuck_before,
+                ).order_by(Task.created_at).limit(100)
+            )).scalars().all()
+
+            requeued = 0
+            for task in stuck:
+                runner = TASK_RUNNERS.get(task.task_type)
+                if runner is None:
+                    continue
+                try:
+                    celery_result = runner(str(task.id))
+                    task.celery_task_id = celery_result.id
+                    task.error_message = None
+                    requeued += 1
+                except Exception as exc:
+                    logger.warning('celery.requeue_failed', task_id=str(task.id), error=str(exc))
+
+            await session.commit()
+            logger.info('celery.requeue_stuck_done', stuck=len(stuck), requeued=requeued)
+
+    async def _runner():
+        try:
+            await _run()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_runner())
+
+
+# Соответствие типа задачи и Celery-задания для повторного запуска
+TASK_RUNNERS = {
+    'PROCESS_TENDER': lambda task_id: process_tender_task.delay(task_id),
+    'SYNC_TENDERS': lambda task_id: sync_tenders_task.delay(task_id),
+    'SEARCH_SUPPLIERS': lambda task_id: search_suppliers_task.delay(task_id),
+    'PARSE_CP': lambda task_id: parse_cp_task.delay(task_id),
+    'SEND_COMMUNICATIONS': lambda task_id: send_communications_task.delay(task_id),
+    'NEGOTIATE': lambda task_id: negotiate_task.delay(task_id),
+    'SEND_REMINDERS': lambda task_id: send_reminders_task.delay(task_id),
+    'REQUEST_DISCOUNTS': lambda task_id: request_discounts_task.delay(task_id),
+    'PIPELINE': lambda task_id: run_full_pipeline_task.delay(task_id),
+}
+
 
 @celery_app.task
 def run_full_pipeline_task(task_id: str):

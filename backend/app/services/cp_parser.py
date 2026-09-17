@@ -293,6 +293,16 @@ async def parse_cp(cp_id: uuid.UUID, db: AsyncSession) -> bool:
     offer.clarification_needed = bool(clarification_items)
     offer.clarification_items = clarification_items
 
+    await db.flush()
+
+    # После разбора КП статус тендера мог измениться (получены полные КП,
+    # достигнут порог маржи) — пересчитываем.
+    try:
+        from app.services.tender_status_service import recalculate_tender_status
+        await recalculate_tender_status(offer.tender_id, db)
+    except Exception as exc:
+        logger.warning('cp_parser.status_recalc_failed', cp_id=str(cp_id), error=str(exc))
+
     await db.commit()
     logger.info('cp_parser.completed', cp_id=str(cp_id), status=offer.status)
     return True

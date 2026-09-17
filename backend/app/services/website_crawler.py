@@ -14,26 +14,96 @@ MAX_PAGES_PER_SITE = 5
 # Страницы которые чаще всего содержат контакты
 CONTACT_PATHS = ['', '/contacts', '/contact', '/kontakty', '/about', '/o-kompanii', '/company', '/feedback']
 
+# Сервисные и чужие домены: адреса с них не являются контактами поставщика
+SERVICE_EMAIL_DOMAINS = {
+    'example.com', 'example.org', 'example.net', 'email.com', 'site.ru', 'domain.ru',
+    'mail.ru', 'yandex.ru', 'gmail.com', 'google.com', 'bk.ru', 'list.ru', 'inbox.ru',
+    'avito.ru', 'youla.ru', 'ozon.ru', 'wildberries.ru', 'sberbank.ru',
+    'wixpress.com', 'sentry.io', 'googlemail.com', 'yandex-team.ru',
+    'demo-sait.ru', 'localhost', 'sentry-next.wixpress.com',
+}
+
+# Технические адреса, которые не имеют отношения к продажам
+SERVICE_EMAIL_PREFIXES = (
+    'noreply', 'no-reply', 'donotreply', 'postmaster', 'abuse', 'webmaster',
+)
+
+# Непрофильные подразделения: письма с запросом КП туда бессмысленны.
+# Региональные отделы продаж (yufosales, dfosales и т.п.) сюда не входят —
+# это как раз коммерческие контакты.
+NON_SALES_PREFIXES = (
+    'hr', 'job', 'jobs', 'vacancy', 'career', 'press', 'marketing',
+    'accounting', 'buh', 'buhgalter', 'finance', 'legal', 'yurist', 'lawyer',
+    'support', 'help', 'reclam', 'complaint', 'personal', 'kadry', 'kadrov',
+)
+
+# Приоритетные адреса для коммерческих запросов
+SALES_PREFIX_PRIORITY = (
+    'sales', 'sale', 'zakaz', 'order', 'shop', 'opt', 'trade', 'commerce',
+    'commercial', 'info', 'mail', 'office', 'reception', 'post',
+)
+
+
+def _is_non_sales(email: str) -> bool:
+    """Относится ли адрес к непрофильному подразделению."""
+    local = email.rsplit('@', 1)[0].lower()
+    return any(local.startswith(prefix) for prefix in NON_SALES_PREFIXES)
+
+
+def _email_priority(email: str) -> int:
+    """Меньше — приоритетнее для запроса коммерческого предложения."""
+    local = email.rsplit('@', 1)[0].lower()
+    for index, prefix in enumerate(SALES_PREFIX_PRIORITY):
+        if local.startswith(prefix):
+            return index
+    return len(SALES_PREFIX_PRIORITY)
+
+
+def _email_domain(email: str) -> str:
+    return email.rsplit('@', 1)[-1].strip('.').lower()
+
+
+def _same_site(email_domain: str, site_domain: str) -> bool:
+    """Относится ли домен письма к сайту (учитывая поддомены)."""
+    site_domain = site_domain.replace('www.', '').lower()
+    if not site_domain:
+        return False
+    return email_domain == site_domain or email_domain.endswith('.' + site_domain)
+
+
 def _extract_emails_from_html(html: str, domain: str) -> List[str]:
-    """Собирает email-адреса из HTML."""
+    """Собирает email-адреса из HTML, относящиеся к самому сайту.
+
+    Адреса с чужих и сервисных доменов отбрасываются: раньше в базу попадали
+    ``connect@avito.ru`` и ``name@example.com``, и письма уходили не поставщику.
+    """
     if not html:
         return []
-    # mailto: и любые email-подобные записи
     pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
     found = set(pattern.findall(html))
-    # Фильтруем: исключаем общие/мусорные адреса и примеси JS
-    common = {'example.com', 'example.org', 'user@email.com', 'email.com', 'site.ru'}
-    valid = []
+    site_domain = (domain or '').replace('www.', '').lower()
+
+    valid: List[str] = []
     for email in found:
         email = email.strip().strip('.').lower()
-        if email in common or len(email) > 80:
+        if len(email) > 80 or email.startswith(SERVICE_EMAIL_PREFIXES):
             continue
-        # Не берём адреса с доменами, непохожими на email (например, заканчивающиеся на цифры)
         if not re.match(r'^[^@]+@[^@]+\.[a-zа-яё]{2,}$', email):
             continue
-        # Здесь ограничение: вытаскиваем только если домен похож на реальный (без пробелов)
+        email_domain = _email_domain(email)
+        # Только адреса на домене самого сайта: чужие и сервисные не подходят
+        if email_domain in SERVICE_EMAIL_DOMAINS:
+            continue
+        if site_domain and not _same_site(email_domain, site_domain):
+            continue
+        # Кадры, бухгалтерия и пресс-служба не занимаются поставками
+        if _is_non_sales(email):
+            continue
         if email not in valid:
             valid.append(email)
+
+    # Первыми — адреса, предназначенные для заказов и продаж
+    valid.sort(key=_email_priority)
     return valid[:5]
 
 

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 import structlog
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
@@ -28,6 +28,13 @@ async def process_tender(tender_id: uuid.UUID, db: AsyncSession):
     if not tender:
         raise ValueError('Тендер не найден')
 
+    # Решение человека неприкосновенно: одобренный или отклонённый тендер
+    # не должен переобрабатываться автоматикой и терять свой статус.
+    if tender.status in ('APPROVED', 'REJECTED'):
+        logger.info('tender_processor.skipped_manual_decision',
+                    tender_id=str(tender_id), status=tender.status)
+        return
+
     previous_status = tender.status
     tender.status = 'PROCESSING'
     history = TenderStatusHistory(
@@ -39,7 +46,16 @@ async def process_tender(tender_id: uuid.UUID, db: AsyncSession):
     db.add(history)
     await db.flush()
 
+    # Ошибка относится к предыдущему прогону — сбрасываем её в начале нового,
+    # иначе успешно обработанный тендер останется с устаревшим сообщением.
+    tender.processing_error = None
+
     try:
+        # Тендеры, импортированные до появления разбора состава закупки, могут
+        # не иметь ни позиций, ни описания. Перед обработкой пробуем добрать
+        # данные из API ГосПлан, иначе тендер уйдёт в ERROR без причины.
+        await _ensure_tender_enriched(tender, db)
+
         documents = await _load_documents(tender_id, db)
         if not documents:
             logger.warning('tender_processor.no_documents', tender_id=str(tender_id))
@@ -50,14 +66,28 @@ async def process_tender(tender_id: uuid.UUID, db: AsyncSession):
                 text = await _parse_document(doc)
                 all_text += text + '\n'
                 doc.parsed_text = text
-                doc.parse_status = 'PARSED' if text else 'ERROR'
+                # SKIPPED — файл недоступен (например, zakupki.gov.ru закрыт с хоста).
+                # Повторно качать не будем, чтобы не блокировать обработку.
+                doc.parse_status = 'PARSED' if text else 'SKIPPED'
                 db.add(doc)
         await db.commit()
 
-        await _semantic_filter(tender, all_text, db)
+        # Семантический портрет: тексты документов, а если их нет и описание
+        # пустое — позиции, уже полученные из API ГосПлан.
+        semantic_text = all_text
+        if not semantic_text and not tender.description:
+            semantic_text = await _positions_text(tender_id, db)
+
+        await _semantic_filter(tender, semantic_text, db)
 
         if tender.status == 'RELEVANT':
-            await _extract_tender_structure(tender, all_text, db)
+            # Позиции из API ГосПлан приоритетнее: LLM-извлечение запускаем
+            # только если состава закупки ещё нет.
+            has_positions = (await db.execute(
+                select(func.count(TenderPosition.id)).where(TenderPosition.tender_id == tender_id)
+            )).scalar_one() > 0
+            if not has_positions:
+                await _extract_tender_structure(tender, all_text, db)
             scoring_history = TenderStatusHistory(
                 tender_id=tender.id,
                 status='SCORING',
@@ -109,6 +139,59 @@ async def process_tender(tender_id: uuid.UUID, db: AsyncSession):
             db.add(error_history)
         await db.commit()
         raise
+
+async def _ensure_tender_enriched(tender: Tender, db: AsyncSession) -> bool:
+    """Добирает состав закупки из API ГосПлан, если данных ещё нет.
+
+    Нужно для тендеров, импортированных до появления разбора позиций:
+    без этого они навсегда остаются без описания и уходят в ERROR.
+    """
+    from app.models.tender_source import TenderSource
+    from app.services.tender_sync_service import enrich_tender_from_purchase, is_source_sync_supported
+    from app.services.gosplan_client import GosPlanClient
+
+    has_positions = (await db.execute(
+        select(func.count(TenderPosition.id)).where(TenderPosition.tender_id == tender.id)
+    )).scalar_one() > 0
+    if has_positions or (tender.description or '').strip():
+        return False
+
+    if not tender.source_tender_id:
+        return False
+
+    source = await db.get(TenderSource, tender.source_id)
+    if source is None or not is_source_sync_supported(source):
+        return False
+
+    try:
+        client = GosPlanClient(base_url=source.api_url)
+        detail = await client.get_purchase(tender.source_tender_id)
+        await enrich_tender_from_purchase(tender, detail, db)
+        await db.flush()
+        logger.info('tender_processor.enriched_from_api', tender_id=str(tender.id))
+        return True
+    except Exception as exc:
+        logger.warning('tender_processor.enrich_failed', tender_id=str(tender.id), error=str(exc))
+        return False
+
+
+async def _positions_text(tender_id: uuid.UUID, db: AsyncSession) -> str:
+    """Текст позиций закупки для семантического анализа.
+
+    Используется, когда документы недоступны: данные о составе закупки уже
+    получены из API ГосПлан и лежат в tender_positions.
+    """
+    positions = (await db.execute(
+        select(TenderPosition)
+        .where(TenderPosition.tender_id == tender_id)
+        .order_by(TenderPosition.position_number)
+    )).scalars().all()
+    if not positions:
+        return ''
+    return '\n'.join(
+        f'{p.name} {p.characteristics} {p.okpd2}'.strip() for p in positions
+    )[:20000]
+
 
 async def _load_documents(tender_id: uuid.UUID, db: AsyncSession) -> List[TenderDocument]:
     """Загружает документы из TenderDocument.source_url, или создаёт на основе tender.source_url.
@@ -183,13 +266,21 @@ async def _parse_document(doc: TenderDocument) -> str:
                 logger.warning('tender_processor.s3_download_failed', storage_path=doc.storage_path)
                 return ''
     else:
-        # Fallback на source_url
+        # Fallback на source_url. Таймауты короткие: если внешний хост
+        # недоступен, обработка не должна зависать на десятки секунд.
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            timeout = httpx.Timeout(12.0, connect=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(doc.source_url)
                 response.raise_for_status()
                 content = response.content
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logger.warning('tender_processor.document_download_failed',
+                           url=doc.source_url[:120], error=str(exc))
+            return ''
+        except Exception as exc:
+            logger.warning('tender_processor.document_download_error',
+                           url=doc.source_url[:120], error=str(exc))
             return ''
     return await extract_text(doc.filename, content, doc.mime_type)
 
@@ -211,14 +302,22 @@ async def _semantic_filter(tender: Tender, text: str, db: AsyncSession):
     try:
         tender_embedding = await generate_embedding(portrait)
     except Exception as exc:
+        # Сбой сервиса эмбеддингов (например, нехватка памяти в Ollama) —
+        # это проблема инфраструктуры, а не данных. Тендер уже обогащён
+        # позициями и описанием, поэтому не помечаем его терминальной ошибкой:
+        # оставляем в UNCERTAIN, чтобы можно было повторить обработку.
         logger.error('semantic_filter.embedding_failed', error=str(exc))
-        tender.status = 'ERROR'
-        tender.processing_error = 'Ошибка генерации эмбеддинга'
+        tender.status = 'UNCERTAIN'
+        # Результаты предыдущих прогонов могут быть неактуальны — сбрасываем,
+        # чтобы повторная обработка считалась с нуля.
+        tender.embedding = None
+        tender.similarity_score = None
+        tender.processing_error = 'Семантический анализ не выполнен: сервис эмбеддингов недоступен (требуется повторная обработка)'
         history = TenderStatusHistory(
             tender_id=tender.id,
-            status='ERROR',
+            status='UNCERTAIN',
             previous_status='PROCESSING',
-            note='Ошибка генерации эмбеддинга'
+            note='Сбой сервиса эмбеддингов, тендер оставлен для повторной обработки'
         )
         db.add(history)
         return

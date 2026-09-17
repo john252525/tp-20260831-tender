@@ -42,6 +42,8 @@ export interface TenderDetail extends TenderListItem {
     positions: TenderPosition[];
     requirements: TenderRequirements;
   } | null;
+  positions: TenderPosition[];
+  requirements: TenderRequirements | null;
   documents: TenderDocument[];
   suppliers: LotSupplier[];
 }

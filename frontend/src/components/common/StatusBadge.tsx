@@ -48,6 +48,7 @@ const STATUS_CONFIG: Record<string, StatusConfig> = {
   NO_SUPPLIERS_FOUND: { label: 'Нет поставщиков', bg: 'bg-red-100', text: 'text-red-700', icon: UserX },
   AWAITING_CP: { label: 'Ожидание КП', bg: 'bg-slate-100', text: 'text-slate-700', icon: Clock },
   CP_REQUESTED: { label: 'КП запрошены', bg: 'bg-blue-100', text: 'text-blue-700', icon: Send },
+  CP_RECEIVED: { label: 'КП получено', bg: 'bg-green-100', text: 'text-green-700', icon: Inbox },
   CP_PARTIALLY_RECEIVED: { label: 'КП частично', bg: 'bg-yellow-100', text: 'text-yellow-700', icon: Inbox },
   CP_FULLY_RECEIVED: { label: 'КП получены', bg: 'bg-green-100', text: 'text-green-700', icon: Inbox },
   NEGOTIATING: { label: 'Переговоры', bg: 'bg-yellow-100', text: 'text-yellow-700', icon: MessagesSquare, pulse: true },

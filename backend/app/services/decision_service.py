@@ -41,7 +41,14 @@ async def get_auto_recommendation(tender_id: str, db: AsyncSession) -> Dict[str,
     risk = await calculate_risk(tender_id, supplier_id=best_supplier.id if best_supplier else None, offer_id=best_offer.id, db=db)
     risk_level = risk['level']
 
-    min_margin = 15.0  # TODO: из настроек
+    # Пороги берём из настроек, а не из захардкоженных значений
+    from app.services.settings_service import get_section_settings
+    scoring_settings = await get_section_settings(db, 'scoring') or {}
+    try:
+        min_margin = float(scoring_settings.get('min_margin_percent', 15.0))
+    except (TypeError, ValueError):
+        min_margin = 15.0
+
     if margin_percent is not None and margin_percent >= min_margin and risk_level in ('LOW', 'MEDIUM'):
         recommendation = 'APPROVE'
     elif margin_percent is not None and margin_percent >= min_margin and risk_level == 'HIGH':

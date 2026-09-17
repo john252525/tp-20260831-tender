@@ -12,8 +12,11 @@ async def generate_embedding(text: str) -> List[float]:
         'model': settings.llm_model_embedding,
         'input': text,
     }
+    # Таймаут с запасом на «холодный» старт Ollama (загрузка модели в память),
+    # но без длинных серий повторов: если сервис недоступен (например, нехватка
+    # памяти), тендер будет возвращён в очередь на повторную обработку.
     timeout = httpx.Timeout(60.0, connect=10.0)
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -31,7 +34,7 @@ async def generate_embedding(text: str) -> List[float]:
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
             if attempt == max_retries - 1:
                 raise
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(2 * (attempt + 1))
 
 async def cosine_similarity(vec1: Union[List[float], object], vec2: Union[List[float], object]) -> float:
     """Косинусное сходство между векторами, принимает List или объекты с методом __iter__."""

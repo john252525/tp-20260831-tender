@@ -15,6 +15,9 @@ from app.models.tender_requirements import TenderRequirements
 from app.models.tender_status_history import TenderStatusHistory
 from app.models.task import Task
 from app.models.category import Category
+from app.models.lot_supplier import LotSupplier
+from app.models.supplier import Supplier
+from app.models.commercial_offer import CommercialOffer
 from app.schemas.tenders import TenderCreateRequest, TenderUpdateRequest, ReprocessRequest, SearchSuppliersRequest, ConfirmSuppliersRequest, SendDraftsRequest
 from app.services.tender_processor import process_tender
 from app.services.supplier_search import search_suppliers_for_tender
@@ -101,6 +104,23 @@ async def list_tenders(
     result = await db.execute(query)
     tenders = result.scalars().all()
 
+    tender_ids = [t.id for t in tenders]
+    positions_counts: Dict[uuid.UUID, int] = {}
+    documents_counts: Dict[uuid.UUID, int] = {}
+    if tender_ids:
+        positions_rows = await db.execute(
+            select(TenderPosition.tender_id, func.count(TenderPosition.id))
+            .where(TenderPosition.tender_id.in_(tender_ids))
+            .group_by(TenderPosition.tender_id)
+        )
+        positions_counts = {row[0]: row[1] for row in positions_rows.all()}
+        documents_rows = await db.execute(
+            select(TenderDocument.tender_id, func.count(TenderDocument.id))
+            .where(TenderDocument.tender_id.in_(tender_ids))
+            .group_by(TenderDocument.tender_id)
+        )
+        documents_counts = {row[0]: row[1] for row in documents_rows.all()}
+
     items = []
     for t in tenders:
         items.append({
@@ -119,8 +139,8 @@ async def list_tenders(
             'score': float(t.score) if t.score is not None else None,
             'matched_category_name': None,
             'similarity_score': float(t.similarity_score) if t.similarity_score is not None else None,
-            'documents_count': 0,
-            'positions_count': 0,
+            'documents_count': documents_counts.get(t.id, 0),
+            'positions_count': positions_counts.get(t.id, 0),
             'suppliers_count': 0,
             'best_margin_percent': float(t.final_margin_percent) if t.final_margin_percent is not None else None,
             'has_decision': t.status in ('READY_FOR_DECISION', 'APPROVED', 'REJECTED', 'NEEDS_MORE_INFO'),
@@ -178,11 +198,141 @@ async def tender_stats(db: AsyncSession = Depends(get_db)):
     }}
 
 
+def _serialize_position(position: TenderPosition) -> Dict[str, Any]:
+    """Представление позиции тендера для API."""
+    return {
+        'id': str(position.id),
+        'position_number': position.position_number,
+        'name': position.name,
+        'characteristics': position.characteristics,
+        'gost': position.gost,
+        'okpd2': position.okpd2,
+        'quantity': float(position.quantity),
+        'unit': position.unit,
+        'is_essential': position.is_essential,
+        'notes': position.notes,
+    }
+
+
+def _serialize_requirements(requirements: Optional[TenderRequirements]) -> Optional[Dict[str, Any]]:
+    """Представление условий поставки для API."""
+    if not requirements:
+        return None
+    return {
+        'delivery_date': requirements.delivery_date.isoformat() if requirements.delivery_date else None,
+        'delivery_address': requirements.delivery_address,
+        'delivery_conditions': requirements.delivery_conditions,
+        'license_required': requirements.license_required,
+        'sro_required': requirements.sro_required,
+        'security_bid': float(requirements.security_bid) if requirements.security_bid is not None else None,
+        'security_contract': float(requirements.security_contract) if requirements.security_contract is not None else None,
+        'prepayment_percent': requirements.prepayment_percent,
+        'stages_count': requirements.stages_count,
+        'special_conditions': requirements.special_conditions or [],
+    }
+
+
+def _serialize_lot_supplier(lot, supplier, best_offer) -> Dict[str, Any]:
+    """Представление поставщика лота для API (со статусом и лучшим КП)."""
+    margin = None
+    if best_offer is not None and best_offer.margin_percent is not None:
+        margin = float(best_offer.margin_percent)
+    return {
+        'id': str(lot.id),
+        'supplier_id': str(lot.supplier_id),
+        'supplier_name': supplier.name if supplier else '',
+        'supplier_email': supplier.email if supplier else '',
+        'supplier_website': supplier.website if supplier else '',
+        'status': lot.status,
+        'priority': lot.priority,
+        'source': lot.source,
+        'match_relevance': lot.match_relevance,
+        'has_cp': best_offer is not None,
+        'cp_status': best_offer.status if best_offer else None,
+        'cp_margin_percent': margin,
+    }
+
+
+def _serialize_document(document: TenderDocument) -> Dict[str, Any]:
+    """Представление документа закупки для API."""
+    preview = None
+    if document.parsed_text:
+        preview = document.parsed_text[:500]
+    return {
+        'id': str(document.id),
+        'filename': document.filename,
+        'file_size_bytes': document.file_size_bytes,
+        'mime_type': document.mime_type,
+        'source_url': document.source_url,
+        'parse_status': document.parse_status,
+        'parsed_text_preview': preview,
+    }
+
+
 @router.get('/{tender_id}')
 async def get_tender(tender_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     t = await db.get(Tender, tender_id)
     if not t:
         raise NotFoundError('Тендер не найден')
+
+    positions_result = await db.execute(
+        select(TenderPosition)
+        .where(TenderPosition.tender_id == tender_id)
+        .order_by(TenderPosition.position_number)
+    )
+    positions = positions_result.scalars().all()
+
+    documents_result = await db.execute(
+        select(TenderDocument)
+        .where(TenderDocument.tender_id == tender_id)
+        .order_by(TenderDocument.filename)
+    )
+    documents = documents_result.scalars().all()
+
+    requirements = (await db.execute(
+        select(TenderRequirements).where(TenderRequirements.tender_id == tender_id)
+    )).scalar_one_or_none()
+
+    lots = (await db.execute(
+        select(LotSupplier).where(LotSupplier.tender_id == tender_id).order_by(LotSupplier.priority)
+    )).scalars().all()
+
+    suppliers_data: List[Dict[str, Any]] = []
+    if lots:
+        lot_ids = [lot.id for lot in lots]
+        supplier_ids = [lot.supplier_id for lot in lots]
+
+        suppliers_map = {
+            supplier.id: supplier
+            for supplier in (await db.execute(
+                select(Supplier).where(Supplier.id.in_(supplier_ids))
+            )).scalars().all()
+        }
+
+        offers = (await db.execute(
+            select(CommercialOffer)
+            .where(CommercialOffer.lot_supplier_id.in_(lot_ids))
+        )).scalars().all()
+        # Лучшим считаем наиболее полное КП: сначала по статусу
+        # (FULL > PARTIAL > NONE), затем по марже. Иначе пустое КП
+        # с «маржой» 100% перекрывает реальное предложение.
+        status_rank = {'FULL': 0, 'PARTIAL': 1, 'NONE': 2}
+        offers.sort(key=lambda o: (
+            status_rank.get(o.status, 3),
+            -(o.margin_percent if o.margin_percent is not None else float('-inf')),
+        ))
+        best_offers: Dict[uuid.UUID, CommercialOffer] = {}
+        for offer in offers:
+            best_offers.setdefault(offer.lot_supplier_id, offer)
+
+        for lot in lots:
+            suppliers_data.append(
+                _serialize_lot_supplier(lot, suppliers_map.get(lot.supplier_id), best_offers.get(lot.id))
+            )
+
+    category = None
+    if t.matched_category_id:
+        category = await db.get(Category, t.matched_category_id)
 
     return {'success': True, 'data': {
         'id': str(t.id),
@@ -202,7 +352,7 @@ async def get_tender(tender_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         'score': float(t.score) if t.score is not None else None,
         'score_components': t.score_components,
         'matched_category_id': str(t.matched_category_id) if t.matched_category_id else None,
-        'matched_category_name': None,
+        'matched_category_name': category.name if category else None,
         'similarity_score': float(t.similarity_score) if t.similarity_score is not None else None,
         'risk_level': t.risk_level,
         'risk_details': t.risk_details,
@@ -213,8 +363,10 @@ async def get_tender(tender_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         'status_history': [],
         'matched_categories': [],
         'structured_data': t.structured_data,
-        'documents': [],
-        'suppliers': [],
+        'positions': [_serialize_position(p) for p in positions],
+        'requirements': _serialize_requirements(requirements),
+        'documents': [_serialize_document(d) for d in documents],
+        'suppliers': suppliers_data,
         'selected_supplier_id': str(t.selected_supplier_id) if t.selected_supplier_id else None,
         'final_margin_absolute': float(t.final_margin_absolute) if t.final_margin_absolute is not None else None,
         'final_margin_percent': float(t.final_margin_percent) if t.final_margin_percent is not None else None,

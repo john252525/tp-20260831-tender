@@ -119,7 +119,12 @@ async def test_sync_pagination():
     assert {t.source_tender_id for t in added_tenders} == {'1', '2', '3'}
 
 @pytest.mark.asyncio
-async def test_sync_stub_fallback():
+async def test_unsupported_source_is_not_synced_and_creates_no_stubs():
+    """Неподдерживаемый источник не синхронизируется и не создаёт заглушки.
+
+    Раньше здесь создавались 10 фиктивных тендеров, из-за чего при
+    автосинхронизации база засорялась мусорными записями.
+    """
     source_id = uuid.uuid4()
     source = TenderSource(
         id=source_id,
@@ -141,9 +146,10 @@ async def test_sync_stub_fallback():
 
     created = await sync_tenders_from_source(source_id, mock_db)
 
-    assert len(created) == 10
-    assert source.last_sync_status == 'success'
-    assert all(isinstance(t, Tender) for t in created)
+    assert created == []
+    assert mock_db.add.call_count == 0
+    assert source.last_sync_status == 'error'
+    assert source.last_error is not None
 
 @pytest.mark.asyncio
 async def test_sync_gosplan_error():

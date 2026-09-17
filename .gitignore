@@ -27,6 +27,8 @@ playwright-report/
 .env.local
 .env.*.local
 .env.bak
+.env.bak*
+*.bak-before-*
 
 # ---------- IDE / OS ----------
 .vscode/
@@ -40,3 +42,6 @@ nohup.out
 # ---------- Logs ----------
 *.log
 logs/
+
+# ---------- Деплой ----------
+.first-token.txt

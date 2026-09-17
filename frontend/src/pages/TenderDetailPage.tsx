@@ -74,7 +74,7 @@ import { Checkbox } from '../components/ui/checkbox';
 // ============================================================
 function TenderOverviewTab({ tender }: { tender: TenderDetail }) {
   const scoreComponents = tender?.score_components;
-  const requirements = tender?.structured_data?.requirements;
+  const requirements = tender?.requirements || tender?.structured_data?.requirements;
   const sourceInfo = tender?.source;
 
   return (
@@ -1274,7 +1274,7 @@ export function TenderDetailPage() {
   const tender = tenderQuery.data;
   if (!tender) return null;
 
-  const positions = tender.structured_data?.positions || [];
+  const positions = tender.positions?.length ? tender.positions : (tender.structured_data?.positions || []);
   const documents = tender.documents || [];
   const suppliers = tender.suppliers || [];
 

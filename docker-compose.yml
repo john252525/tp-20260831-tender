@@ -13,8 +13,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
-      ollama:
-        condition: service_started
+      # ollama вынесен в отдельный сервис (tp-20260831-tender-ollama),
+      # адрес задаётся через EMBEDDING_SERVICE_URL
     environment:
       APP_ENV: production
       APP_DEBUG: 'false'
@@ -32,7 +32,7 @@ services:
       LLM_MODEL_CHAT: ${LLM_MODEL_CHAT:-gpt-4o-mini}
       LLM_MODEL_EMBEDDING: ${LLM_MODEL_EMBEDDING:-nomic-embed-text}
       LLM_EMBEDDING_DIMENSIONS: ${LLM_EMBEDDING_DIMENSIONS:-768}
-      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://ollama:11434}
+      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://199.189.253.227:11434}
       SEARCH_API_URL: ${SEARCH_API_URL:-https://2222.apitter.com/search/api.php}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -101,8 +101,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
-      ollama:
-        condition: service_started
+      # ollama вынесен в отдельный сервис (tp-20260831-tender-ollama),
+      # адрес задаётся через EMBEDDING_SERVICE_URL
     environment:
       APP_ENV: production
       APP_DEBUG: 'false'
@@ -120,7 +120,7 @@ services:
       LLM_MODEL_CHAT: ${LLM_MODEL_CHAT:-gpt-4o-mini}
       LLM_MODEL_EMBEDDING: ${LLM_MODEL_EMBEDDING:-nomic-embed-text}
       LLM_EMBEDDING_DIMENSIONS: ${LLM_EMBEDDING_DIMENSIONS:-768}
-      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://ollama:11434}
+      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://199.189.253.227:11434}
       SEARCH_API_URL: ${SEARCH_API_URL:-https://2222.apitter.com/search/api.php}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -200,21 +200,28 @@ services:
       retries: 5
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
-    command: serve
-    volumes:
-      - ollama_data:/root/.ollama
-    expose:
-      - "11434"
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
+  # Локальный Ollama вынесен в отдельный сервис: см. репозиторий
+  # tp-20260831-tender-ollama и docs/INTEGRATION.md.
+  # Адрес задаётся через EMBEDDING_SERVICE_URL.
+  #
+  # Аварийный резерв (раскомментировать, только если внешний сервис недоступен
+  # и нужно временно считать эмбеддинги локально):
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   command: serve
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   expose:
+  #     - "11434"
+  #   healthcheck:
+  #     test: ["CMD", "ollama", "list"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 10
+  #   restart: unless-stopped
 
 volumes:
   postgres_data:
   minio_data:
-  ollama_data:
+  # ollama_data:  # нужен только для локального резервного варианта

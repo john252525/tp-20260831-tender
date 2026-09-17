@@ -12,7 +12,7 @@ from app.services.supplier_search import (
     search_suppliers_for_tender,
     _extract_domain,
     _deduplicate,
-    _search_google,
+    _search_external,
     _search_internal,
 )
 
@@ -54,7 +54,7 @@ async def test_search_suppliers_internal_only():
     suppliers_result.scalars().all.return_value = [supplier]
     mock_db.execute.side_effect = [positions_result, suppliers_result]
 
-    with patch('app.services.supplier_search._search_google', new_callable=AsyncMock) as mock_google:
+    with patch('app.services.supplier_search._search_external', new_callable=AsyncMock) as mock_google:
         mock_google.return_value = []
         result = await search_suppliers_for_tender(
             tender_id=tender.id,
@@ -68,23 +68,29 @@ async def test_search_suppliers_internal_only():
     assert result['results'][0]['already_in_db'] is True
 
 @pytest.mark.asyncio
-async def test_search_google_mock():
-    with patch('app.services.supplier_search.settings.google_search_api_key', 'test-key'), \
-         patch('app.services.supplier_search.settings.google_search_cx', 'test-cx'):
-        mock_response = MagicMock(spec=Response)
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'items': [
-                {'link': 'https://example.com', 'title': 'Example'}
-            ]
-        }
-        mock_response.raise_for_status = MagicMock()
-        with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = mock_response
-            results = await _search_google(['ноутбук оптом'])
+async def test_search_external_parses_results():
+    """Внешний поиск отдаёт кандидатов с доменом и осмысленным именем."""
+    mock_response = MagicMock(spec=Response)
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        'success': True,
+        'results': [
+            # SEO-заголовок не должен становиться именем поставщика
+            {'url': 'https://perchatki21.ru/catalog', 'title': '  купить в СПб - цена на ...'},
+            # маркетплейс не является поставщиком
+            {'url': 'https://www.avito.ru/items', 'title': 'Объявления'},
+        ],
+    }
+    mock_response.raise_for_status = MagicMock()
+    with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_response
+        results = await _search_external(['нитриловые перчатки оптом'])
+
     assert len(results) == 1
     assert results[0]['source'] == 'google'
-    assert results[0]['domain'] == 'example.com'
+    assert results[0]['domain'] == 'perchatki21.ru'
+    # Имя взято из домена, а не из SEO-заголовка
+    assert results[0]['name'] == 'Perchatki21'
 
 @pytest.mark.asyncio
 async def test_extract_domain():

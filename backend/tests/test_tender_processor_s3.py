@@ -22,12 +22,16 @@ async def test_process_tender_uploads_document_to_s3():
     )
 
     mock_db = AsyncMock()
-    mock_db.get = AsyncMock(return_value=tender)
+    # get вызывается и для тендера, и для источника (при автообогащении)
+    mock_db.get = AsyncMock(side_effect=lambda model, pk: tender if model is Tender else None)
 
-    # Настраиваем execute для _load_documents: пустой список существующих документов
+    # Первый execute — проверка наличия позиций при автообогащении
+    positions_count_result = MagicMock()
+    positions_count_result.scalar_one.return_value = 0
+    # Второй execute — поиск существующих документов в _load_documents
     existing_docs_result = MagicMock()
     existing_docs_result.scalars().all.return_value = []
-    mock_db.execute = AsyncMock(return_value=existing_docs_result)
+    mock_db.execute = AsyncMock(side_effect=[positions_count_result, existing_docs_result])
 
     mock_db.add = MagicMock()
     mock_db.commit = AsyncMock()
