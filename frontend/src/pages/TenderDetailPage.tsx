@@ -239,6 +239,11 @@ function TenderOverviewTab({ tender }: { tender: TenderDetail }) {
 // Вкладка «Позиции»
 // ============================================================
 function TenderPositionsTab({ positions }: { positions: any[] }) {
+  // В закупках бывает больше 10 000 позиций. Рендерить все строки сразу нельзя:
+  // браузер съедает память и вкладка перестаёт открываться. Показываем порциями.
+  const PAGE_SIZE = 200;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
   const handleExport = () => {
     if (!positions || positions.length === 0) return;
     const headers = ['№', 'Наименование', 'Характеристики', 'ГОСТ', 'ОКПД2', 'Количество', 'Ед.', 'Критичность'];
@@ -266,9 +271,15 @@ function TenderPositionsTab({ positions }: { positions: any[] }) {
     return <EmptyState title="Позиции не найдены" description="Структурированные данные ещё не извлечены" />;
   }
 
+  const visiblePositions = positions.slice(0, visibleCount);
+  const hasMore = positions.length > visibleCount;
+
   return (
     <div>
-      <div className="flex justify-end mb-3">
+      <div className="flex items-center justify-between mb-3 gap-3">
+        <p className="text-sm text-slate-500">
+          Показано {visiblePositions.length} из {positions.length}
+        </p>
         <Button variant="outline" size="sm" onClick={handleExport}>
           <Download className="h-3.5 w-3.5 mr-1.5" aria-hidden="true" />
           Экспорт CSV
@@ -289,7 +300,7 @@ function TenderPositionsTab({ positions }: { positions: any[] }) {
             </tr>
           </thead>
           <tbody>
-            {positions.map((position: any) => (
+            {visiblePositions.map((position: any) => (
               <tr key={position.id} className="border-b border-slate-100 hover:bg-slate-50">
                 <td className="px-4 py-3 text-slate-600">{position.position_number}</td>
                 <td className="px-4 py-3 font-medium text-slate-900">{position.name}</td>
@@ -312,6 +323,17 @@ function TenderPositionsTab({ positions }: { positions: any[] }) {
           </tbody>
         </table>
       </div>
+      {hasMore && (
+        <div className="flex justify-center mt-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setVisibleCount((count) => count + PAGE_SIZE)}
+          >
+            Показать ещё {Math.min(PAGE_SIZE, positions.length - visibleCount)} из {positions.length - visibleCount}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
