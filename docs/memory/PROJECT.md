@@ -240,7 +240,16 @@ SuppliersPage, SourcesPage, ScoringPage, TemplatesPage
    Committed_AS около 16 ГБ от чужих проектов. Ollama вынесена в отдельный сервис,
    чтобы убрать крупнейшего потребителя памяти.
 
-3. Playwright браузер не установить: образ не скачивается по TLS, на Alpine бинарники
-   несовместимы (musl). UI проверяется через jest и jsdom на реальных ответах API.
+3. Playwright работает, но только С ХОСТА, не из контейнера. На хосте (Ubuntu 26.04,
+   glibc) браузеры уже установлены: /root/.cache/ms-playwright/chromium_headless_shell-1234.
+   В alpine-контейнерах запускать нельзя: musl несовместим с бинарниками Chrome
+   (ошибка «Executable doesn't exist»). Полный chromium на тяжёлых страницах падает
+   по OOM, headless shell — нет.
+
+   Рабочий запуск:
+
+       cd frontend && node e2e/live-card-check.cjs
+
+   Проверки на реальном ответе API без браузера остаются: jest плюс jsdom.
 
 4. Docker образы без бинд-маунтов: правки кода требуют пересборки (docker compose build).

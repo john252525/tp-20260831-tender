@@ -46,6 +46,13 @@
 - Токен: localStorage api_token, заголовок X-Api-Token
 - Стили: Tailwind, утилита cn для условных классов
 - Тесты: jest + jsdom, Testing Library, jest.mock для сетевого слоя
+- E2E на реальном фронте — через Playwright, но ТОЛЬКО с хоста, не из контейнера:
+
+      cd frontend && node e2e/live-card-check.cjs
+
+  Использовать headless shell (полный chromium падает по OOM на больших страницах).
+  jsdom не воспроизводит память браузера, поэтому тяжёлые страницы проверять
+  реальным браузером
 
 ## Деплой
 
